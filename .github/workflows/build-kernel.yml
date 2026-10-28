@@ -135,10 +135,14 @@ jobs:
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make -j"${{ inputs.jobs }}" ${{ env.DEFCONFIG }} 2>&1 | tail -20
-          echo "=== 合并后的关键配置确认 ==="
-          grep -E "^CONFIG_MSM_CAMERA=|^CONFIG_SND_SOC_WCD934X=|^CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=|^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=|^CONFIG_DRM_MSM=" .config || true
-          grep -c "^CONFIG_" .config
+          # 官方用 O=out 外置构建目录（build_kernel.sh:78-80）。
+          # 在源码树内构建会导致 techpack 的 $(srctree) 与
+          # trace/define_trace.h 的相对 include 失效。
+          mkdir -p out
+          make O=out ${{ env.DEFCONFIG }} 2>&1 | tail -15
+          echo "=== 关键配置确认 ==="
+          grep -E "^CONFIG_MSMB_CAMERA=|^CONFIG_IMG_GZ_DTB=|^CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=|^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=|^CONFIG_DRM_MSM_DSI_STAGING=" out/.config || true
+          grep -c "^CONFIG_" out/.config
 
       - name: Build dtb first (fail fast)
         run: |
@@ -148,15 +152,15 @@ jobs:
           export KCFLAGS="-w"
           # Linux 4.9 的 sign-file.c 与 openssl 3.x 的 ENGINE_* 弃用告警冲突，
           # 只有模块签名才需要它；本轮不签模块，直接把 CONFIG_MODULE_SIG 关掉。
-          ./scripts/config --file .config -d MODULE_SIG -d MODULE_SIG_ALL \
+          ./scripts/config --file out/.config -d MODULE_SIG -d MODULE_SIG_ALL \
             -d MODULE_SIG_FORCE -d SYSTEM_TRUSTED_KEYS -d SYSTEM_REVOCATION_KEYS || true
           # GCC 13/14 对 Linux 4.9 有一批误报（-Warray-bounds / -Wstringop-overflow /
           # -Wmaybe-uninitialized）。comma 官方用 KCFLAGS="-w" 压制，这里照做。
-          make olddefconfig >/dev/null 2>&1 || true
-          echo "MODULE_SIG: $(grep -c '^CONFIG_MODULE_SIG=y' .config || true)"
-          make -j"${{ inputs.jobs }}" qcom/${DT_NAME}.dtb 2>&1 | tail -30
-          ls -la arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
-          file arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
+          make O=out olddefconfig >/dev/null 2>&1 || true
+          echo "MODULE_SIG: $(grep -c '^CONFIG_MODULE_SIG=y' out/.config || true)"
+          make O=out -j"${{ inputs.jobs }}" qcom/${DT_NAME}.dtb 2>&1 | tail -30
+          ls -la out/arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
+          file out/arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
 
       - name: Build kernel
         run: |
@@ -168,7 +172,7 @@ jobs:
           export WERROR=0
           # 产物由 CONFIG_IMG_GZ_DTB=y 驱动 -> Image.gz-dtb（与 6T 原厂一致）
           set -o pipefail
-          make -j"${{ inputs.jobs }}" Image.gz-dtb > /tmp/kbuild.log 2>&1 || {
+          make O=out -j"${{ inputs.jobs }}" Image.gz-dtb > /tmp/kbuild.log 2>&1 || {
             rc=$?
             echo "=== BUILD FAILED rc=$rc, 错误摘要 ==="
             grep -nE 'error:|\*\*\*|No rule|undefined reference|fatal' /tmp/kbuild.log | tail -30
@@ -183,15 +187,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          K=kernel/arch/arm64/boot
+          K=kernel/out/arch/arm64/boot
           for f in Image Image.gz Image-dtb Image.gz-dtb; do
             [ -f "$K/$f" ] && cp "$K/$f" dist/ && ls -lh "dist/$f"
           done
           [ -f "$K/dts/qcom/${DT_NAME}.dtb" ] && cp "$K/dts/qcom/${DT_NAME}.dtb" dist/
           # 关键符号表（验证 camerad 依赖的驱动是否真编进去了）
-          if [ -f kernel/vmlinux ]; then
-            cp kernel/vmlinux dist/ 2>/dev/null || true
-            aarch64-linux-gnu-nm kernel/vmlinux 2>/dev/null | grep -iE "msm_camera|imx519|imx371|wcd934x|synaptics" > dist/kernel-symbols.txt || true
+          if [ -f kernel/out/vmlinux ]; then
+            cp kernel/out/vmlinux dist/ 2>/dev/null || true
+            aarch64-linux-gnu-nm kernel/out/vmlinux 2>/dev/null | grep -iE "msm_camera|imx519|imx371|wcd934x|synaptics" > dist/kernel-symbols.txt || true
             wc -l dist/kernel-symbols.txt 2>/dev/null || true
           fi
           ls -lh dist/ || true
@@ -211,7 +215,7 @@ jobs:
         with:
           name: build-log
           path: |
-            kernel/.config
+            kernel/out/.config
             /tmp/kbuild.log
           if-no-files-found: ignore
           retention-days: 7
