@@ -149,7 +149,13 @@ jobs:
           set -euo pipefail
           cd kernel
           export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
-          make -j"${{ inputs.jobs }}" ${DT_NAME}.dtb 2>&1 | tail -30
+          # Linux 4.9 的 sign-file.c 与 openssl 3.x 的 ENGINE_* 弃用告警冲突，
+          # 只有模块签名才需要它；本轮不签模块，直接把 CONFIG_MODULE_SIG 关掉。
+          ./scripts/config --file .config -d MODULE_SIG -d MODULE_SIG_ALL \
+            -d MODULE_SIG_FORCE -d SYSTEM_TRUSTED_KEYS -d SYSTEM_REVOCATION_KEYS || true
+          make olddefconfig >/dev/null 2>&1 || true
+          echo "MODULE_SIG: $(grep -c '^CONFIG_MODULE_SIG=y' .config || true)"
+          make -j"${{ inputs.jobs }}" qcom/${DT_NAME}.dtb 2>&1 | tail -30
           ls -la arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
           file arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
 
