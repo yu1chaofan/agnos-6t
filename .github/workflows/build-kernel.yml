@@ -129,6 +129,33 @@ jobs:
           python3 -m py_compile scripts/gcc-wrapper.py && echo "gcc-wrapper.py OK (py3)"
           head -3 scripts/gcc-wrapper.py
 
+      - name: Patch camera_v2 CPP clk header
+        run: |
+          set -euo pipefail
+          cd kernel
+          # msm_cpp_soc.c include 的是高通私有 <linux/clk/msm-clk.h>，
+          # AGNOS 树里没有这个头，导致 struct clk 未定义。
+          # 补一个最小兼容头：把 msm-clk.h 映射到标准 <linux/clk.h>。
+          if [ -f drivers/media/platform/msm/camera_v2/pproc/cpp/msm_cpp_soc.c ]; then
+            mkdir -p include/linux/clk
+            if [ ! -f include/linux/clk/msm-clk.h ]; then
+              cat > include/linux/clk/msm-clk.h <<'EOF'
+          #ifndef _LINUX_CLK_MSM_CLK_H
+          #define _LINUX_CLK_MSM_CLK_H
+          /* Minimal shim: AGNOS tree lacks Qualcomm's private msm-clk.h.
+           * Map to the standard clock framework so camera CPP can compile. */
+          #include <linux/clk.h>
+          #include <linux/clk-provider.h>
+          #endif
+          EOF
+              echo "created include/linux/clk/msm-clk.h"
+            fi
+            if [ ! -f include/linux/clk/msm-clk-provider.h ]; then
+              printf '#include <linux/clk-provider.h>\n' > include/linux/clk/msm-clk-provider.h
+              echo "created include/linux/clk/msm-clk-provider.h"
+            fi
+          fi
+
       - name: Configure kernel
         run: |
           set -euo pipefail
