@@ -167,7 +167,16 @@ jobs:
           export KCFLAGS="-w"
           export WERROR=0
           # 产物由 CONFIG_IMG_GZ_DTB=y 驱动 -> Image.gz-dtb（与 6T 原厂一致）
-          make -j"${{ inputs.jobs }}" Image.gz-dtb 2>&1 | tail -60
+          set -o pipefail
+          make -j"${{ inputs.jobs }}" Image.gz-dtb > /tmp/kbuild.log 2>&1 || {
+            rc=$?
+            echo "=== BUILD FAILED rc=$rc, 错误摘要 ==="
+            grep -nE 'error:|\*\*\*|No rule|undefined reference|fatal' /tmp/kbuild.log | tail -30
+            echo "=== 最后 30 行 ==="
+            tail -30 /tmp/kbuild.log
+            exit $rc
+          }
+          tail -20 /tmp/kbuild.log
 
       - name: Collect artifacts
         if: always()
@@ -201,6 +210,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: kernel/.config
+          path: |
+            kernel/.config
+            /tmp/kbuild.log
           if-no-files-found: ignore
           retention-days: 7
