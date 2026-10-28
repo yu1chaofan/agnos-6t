@@ -1,0 +1,155 @@
+name: build-kernel
+
+# OnePlus 6T (fajita / SDM845 v2.1) AGNOS 内核编译
+#
+# 来源: commaai/agnos-kernel-sdm845 (tici_defconfig)
+# 适配: 6T 完整设备树（从真机 DTB 反编译 + dtbo merge，已验证可往返编译）
+#
+# 关键改动 vs tici_defconfig:
+#   + CONFIG_MSM_CAMERA=y            camerad 需要 camera_v2 V4L2 路径
+#   + CONFIG_SND_SOC_WCD934X=y       音频编进内核（原厂是 .ko，重编后 vermagic 失效）
+#   + CONFIG_SND_SOC_WSA881X=y
+#   + CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="sdm845-oneplus6t"
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: 'agnos-kernel-sdm845 分支'
+        required: false
+        default: 'master'
+      jobs:
+        description: 'make -j'
+        required: false
+        default: '4'
+  push:
+    branches: [main]
+    paths:
+      - 'dts/**'
+      - 'defconfig/**'
+      - '.github/workflows/build-kernel.yml'
+
+permissions:
+  contents: write
+
+env:
+  KERNEL_REPO: 'https://github.com/commaai/agnos-kernel-sdm845.git'
+  DEFCONFIG: 'fajita_defconfig'
+  DT_NAME: 'sdm845-oneplus6t'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout (this repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu device-tree-compiler \
+            python3 python3-pip cpio rsync xz-utils
+          aarch64-linux-gnu-gcc --version | head -1
+          dtc --version
+
+      - name: Fetch kernel source (shallow)
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.kernel_ref || 'master' }}"
+          echo "kernel ref: $REF"
+          # 1.2GB 仓库，用 blobless + depth 1 大幅减小
+          git clone --depth 1 --single-branch --branch "$REF" "$KERNEL_REPO" kernel
+          cd kernel
+          echo "kernel commit: $(git rev-parse HEAD)"
+          du -sh .git . 2>/dev/null | tail -2
+
+      - name: Install 6T board support
+        run: |
+          set -euo pipefail
+          set -x
+          # 1. 放入 6T 设备树
+          cp dts/${DT_NAME}.dts kernel/arch/arm64/boot/dts/qcom/
+
+          # 2. 注册进 Makefile
+          DTS_MAKE=kernel/arch/arm64/boot/dts/qcom/Makefile
+          if ! grep -q "${DT_NAME}.dtb" "$DTS_MAKE"; then
+            echo "dtb-\$(CONFIG_ARCH_QCOM) += ${DT_NAME}.dtb" >> "$DTS_MAKE"
+          fi
+          tail -3 "$DTS_MAKE"
+
+          # 3. 放入 defconfig
+          cp defconfig/${DEFCONFIG} kernel/arch/arm64/configs/
+
+          # 4. 让 APPENDED_DTB 指向我们的 dtb
+          sed -i 's|^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES=.*|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/sdm845-oneplus6t"|' \
+            kernel/arch/arm64/configs/${DEFCONFIG}
+          grep APPENDED kernel/arch/arm64/configs/${DEFCONFIG}
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make -j"${{ inputs.jobs }}" ${{ env.DEFCONFIG }} 2>&1 | tail -20
+          echo "=== 合并后的关键配置确认 ==="
+          grep -E "^CONFIG_MSM_CAMERA=|^CONFIG_SND_SOC_WCD934X=|^CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=|^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=|^CONFIG_DRM_MSM=" .config || true
+          grep -c "^CONFIG_" .config
+
+      - name: Build dtb first (fail fast)
+        run: |
+          set -euo pipefail
+          cd kernel
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          make -j"${{ inputs.jobs }}" ${DT_NAME}.dtb 2>&1 | tail -30
+          ls -la arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
+          file arch/arm64/boot/dts/qcom/${DT_NAME}.dtb
+
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          cd kernel
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          make -j"${{ inputs.jobs }}" Image.gz-dtb 2>&1 | tail -60
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          K=kernel/arch/arm64/boot
+          for f in Image Image.gz Image.gz-dtb; do
+            [ -f "$K/$f" ] && cp "$K/$f" dist/ && ls -lh "dist/$f"
+          done
+          [ -f "$K/dts/qcom/${DT_NAME}.dtb" ] && cp "$K/dts/qcom/${DT_NAME}.dtb" dist/
+          # 关键符号表（验证 camerad 依赖的驱动是否真编进去了）
+          if [ -f kernel/vmlinux ]; then
+            cp kernel/vmlinux dist/ 2>/dev/null || true
+            aarch64-linux-gnu-nm kernel/vmlinux 2>/dev/null | grep -iE "msm_camera|imx519|imx371|wcd934x|synaptics" > dist/kernel-symbols.txt || true
+            wc -l dist/kernel-symbols.txt 2>/dev/null || true
+          fi
+          ls -lh dist/ || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6T-kernel-${{ inputs.kernel_ref || 'master' }}
+          path: dist
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/.config
+          if-no-files-found: ignore
+          retention-days: 7
