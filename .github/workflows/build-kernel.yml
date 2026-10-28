@@ -54,9 +54,19 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
             gcc-aarch64-linux-gnu device-tree-compiler \
-            python3 python3-pip cpio rsync xz-utils
+            python3 python3-pip cpio rsync xz-utils libssl-dev libelf-dev \
+            gcc libc6-dev make
+          # Linux 4.9 的 scripts/ 硬引用 python2（ubuntu-24.04 已移除）。
+          # 不动系统源（会污染 apt），直接把 4.9 的 py2 脚本改成 py3：
+          # 4.9 的 scripts/kconfig/merge_config.sh、scripts/dtc 的 py 部分
+          # 在 py3 下基本兼容，只有 shebang 和少数 print 语句要动。
+          sudo ln -sf /usr/bin/python3 /usr/local/bin/python2
+          echo "python2 -> $(readlink -f /usr/local/bin/python2)"
+          python2 --version 2>&1 | head -1
           aarch64-linux-gnu-gcc --version | head -1
+          gcc --version | head -1
           dtc --version
+          python2 --version
 
       - name: Fetch kernel source (shallow)
         run: |
@@ -116,7 +126,9 @@ jobs:
           set -euo pipefail
           cd kernel
           export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
-          make -j"${{ inputs.jobs }}" Image.gz-dtb 2>&1 | tail -60
+          # AGNOS 产物是 Image-dtb（12字节 UNCOMPRESSED_IMG 头 + 裸Image + DTB），
+          # 不是 Image.gz-dtb。由 CONFIG_IMG_DTB / CONFIG_UNCOMPRESSED_KERNEL 驱动。
+          make -j"${{ inputs.jobs }}" Image-dtb 2>&1 | tail -60
 
       - name: Collect artifacts
         if: always()
@@ -124,7 +136,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           K=kernel/arch/arm64/boot
-          for f in Image Image.gz Image.gz-dtb; do
+          for f in Image Image.gz Image-dtb Image.gz-dtb; do
             [ -f "$K/$f" ] && cp "$K/$f" dist/ && ls -lh "dist/$f"
           done
           [ -f "$K/dts/qcom/${DT_NAME}.dtb" ] && cp "$K/dts/qcom/${DT_NAME}.dtb" dist/
